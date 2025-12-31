@@ -1,8 +1,24 @@
 """Database models and API schemas."""
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from typing import Optional, List
 from sqlmodel import SQLModel, Field
 from pydantic import BaseModel
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
+
+def get_local_now() -> datetime:
+    """Get current time in configured timezone (defaults to UTC)."""
+    tz_name = os.getenv("TIMEZONE", "UTC")
+    try:
+        tz = ZoneInfo(tz_name)
+        return datetime.now(tz)
+    except Exception:
+        return datetime.now(timezone.utc)
 
 
 # ============ Database Models ============
@@ -11,7 +27,7 @@ class TestRun(SQLModel, table=True):
     """Test run record."""
     id: Optional[int] = Field(default=None, primary_key=True)
     target_url: str
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=get_local_now)
     completed_at: Optional[datetime] = None
     status: str = "running"  # running, completed, failed
     total_utterances: int = 0
@@ -32,7 +48,7 @@ class ConversationLog(SQLModel, table=True):
     bot_response: str = ""
     latency_ms: int = 0
     status: str = "pending"  # pass, fail, error
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=get_local_now)
     category: str = ""  # utterance category
     
     # LLM Evaluation fields

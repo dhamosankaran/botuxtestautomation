@@ -1,6 +1,6 @@
 /* ConfigPanel component - Left sidebar with test configuration */
 import { useState } from 'react';
-import { Play, ChevronDown, ChevronUp, Settings, Globe, User, Lock, MessageSquare, Library, Brain } from 'lucide-react';
+import { Play, ChevronDown, ChevronUp, Settings, Globe, User, Lock, MessageSquare, Library, Brain, CreditCard, Wallet, Shield, Gift, FileText } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useUtteranceLibrary, useHealthCheck } from '../hooks/useTestResults';
 import type { StartTestRequest, ChatbotConfig } from '../types';
@@ -10,6 +10,35 @@ interface ConfigPanelProps {
     isRunning: boolean;
 }
 
+// Category groups for organized display
+const CATEGORY_GROUPS = {
+    cards: {
+        label: '💳 Cards Services',
+        icon: CreditCard,
+        categories: ['card_issues', 'cards_dispute', 'cards_balance_transfer', 'cards_replacement', 'cards_update_contact', 'credit_card'],
+    },
+    account: {
+        label: '💰 Account & Money',
+        icon: Wallet,
+        categories: ['account_balance', 'transactions', 'payments', 'transfers', 'account_management'],
+    },
+    security: {
+        label: '🔐 Security',
+        icon: Shield,
+        categories: ['login_security', 'escalation_test'],
+    },
+    rewards: {
+        label: '🎁 Rewards & Benefits',
+        icon: Gift,
+        categories: ['rewards', 'rewards_benefits', 'travel_benefits'],
+    },
+    other: {
+        label: '📄 Other Services',
+        icon: FileText,
+        categories: ['statements_documents', 'fees_charges', 'loans_offers'],
+    },
+};
+
 export function ConfigPanel({ onStartTest, isRunning }: ConfigPanelProps) {
     const [targetUrl, setTargetUrl] = useState('https://www.citi.com');
     const [username, setUsername] = useState('');
@@ -18,6 +47,7 @@ export function ConfigPanel({ onStartTest, isRunning }: ConfigPanelProps) {
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [useLibrary, setUseLibrary] = useState(false);
     const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+    const [expandedGroups, setExpandedGroups] = useState<string[]>(['cards']); // Cards expanded by default
 
     const { data: library } = useUtteranceLibrary();
     const { data: health } = useHealthCheck();
@@ -35,6 +65,51 @@ export function ConfigPanel({ onStartTest, isRunning }: ConfigPanelProps) {
                 ? prev.filter(c => c !== category)
                 : [...prev, category]
         );
+    };
+
+    const toggleGroup = (groupKey: string) => {
+        setExpandedGroups(prev =>
+            prev.includes(groupKey)
+                ? prev.filter(g => g !== groupKey)
+                : [...prev, groupKey]
+        );
+    };
+
+    const selectAllInGroup = (groupKey: string) => {
+        const group = CATEGORY_GROUPS[groupKey as keyof typeof CATEGORY_GROUPS];
+        const availableCategories = group.categories.filter(
+            cat => library?.categories.some(c => c.name === cat)
+        );
+
+        const allSelected = availableCategories.every(cat => selectedCategories.includes(cat));
+
+        if (allSelected) {
+            // Deselect all in group
+            setSelectedCategories(prev => prev.filter(c => !availableCategories.includes(c)));
+        } else {
+            // Select all in group
+            setSelectedCategories(prev => [...new Set([...prev, ...availableCategories])]);
+        }
+    };
+
+    const getGroupCategoryCount = (groupKey: string) => {
+        const group = CATEGORY_GROUPS[groupKey as keyof typeof CATEGORY_GROUPS];
+        return group.categories.filter(
+            cat => library?.categories.some(c => c.name === cat)
+        ).length;
+    };
+
+    const getGroupUtteranceCount = (groupKey: string) => {
+        const group = CATEGORY_GROUPS[groupKey as keyof typeof CATEGORY_GROUPS];
+        return group.categories.reduce((sum, cat) => {
+            const found = library?.categories.find(c => c.name === cat);
+            return sum + (found?.count || 0);
+        }, 0);
+    };
+
+    const getGroupSelectedCount = (groupKey: string) => {
+        const group = CATEGORY_GROUPS[groupKey as keyof typeof CATEGORY_GROUPS];
+        return group.categories.filter(cat => selectedCategories.includes(cat)).length;
     };
 
     const handleSubmit = (e: React.FormEvent) => {
@@ -151,27 +226,91 @@ export function ConfigPanel({ onStartTest, isRunning }: ConfigPanelProps) {
                     </button>
                 </div>
 
-                {/* Category Selection (when using library) */}
+                {/* Grouped Category Selection (when using library) */}
                 {useLibrary && library && (
                     <div className="space-y-2">
-                        <label className="text-sm font-medium text-slate-300">Select Categories ({selectedCategories.length || 'All'})</label>
-                        <div className="grid grid-cols-2 gap-1.5 max-h-40 overflow-y-auto">
-                            {library.categories.map(cat => (
+                        <div className="flex items-center justify-between">
+                            <label className="text-sm font-medium text-slate-300">
+                                Select Features ({selectedCategories.length || 'All'})
+                            </label>
+                            {selectedCategories.length > 0 && (
                                 <button
-                                    key={cat.name}
                                     type="button"
-                                    onClick={() => toggleCategory(cat.name)}
-                                    className={cn(
-                                        "text-left px-2 py-1.5 rounded text-xs transition-colors",
-                                        selectedCategories.includes(cat.name)
-                                            ? "bg-purple-600/30 text-purple-300 border border-purple-500/30"
-                                            : "bg-slate-800/50 text-slate-400 border border-slate-700/30 hover:bg-slate-700/50"
-                                    )}
+                                    onClick={() => setSelectedCategories([])}
+                                    className="text-xs text-purple-400 hover:text-purple-300"
                                 >
-                                    <div className="capitalize truncate">{cat.name.replace('_', ' ')}</div>
-                                    <div className="text-xs opacity-60">{cat.count} Q's</div>
+                                    Clear All
                                 </button>
-                            ))}
+                            )}
+                        </div>
+
+                        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                            {Object.entries(CATEGORY_GROUPS).map(([groupKey, group]) => {
+                                const availableCount = getGroupCategoryCount(groupKey);
+                                if (availableCount === 0) return null;
+
+                                const isExpanded = expandedGroups.includes(groupKey);
+                                const selectedCount = getGroupSelectedCount(groupKey);
+                                const utteranceCount = getGroupUtteranceCount(groupKey);
+                                const Icon = group.icon;
+
+                                return (
+                                    <div key={groupKey} className="bg-slate-800/30 rounded-lg border border-slate-700/30 overflow-hidden">
+                                        {/* Group Header */}
+                                        <div className="flex items-center justify-between px-3 py-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => toggleGroup(groupKey)}
+                                                className="flex items-center gap-2 text-sm font-medium text-slate-200 hover:text-white flex-1 text-left"
+                                            >
+                                                {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                                                <Icon className="w-4 h-4 text-purple-400" />
+                                                <span>{group.label}</span>
+                                                <span className="text-xs text-slate-500">({utteranceCount})</span>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => selectAllInGroup(groupKey)}
+                                                className={cn(
+                                                    "text-xs px-2 py-0.5 rounded transition-colors",
+                                                    selectedCount === availableCount
+                                                        ? "bg-purple-600/40 text-purple-300"
+                                                        : "bg-slate-700/50 text-slate-400 hover:bg-slate-700 hover:text-white"
+                                                )}
+                                            >
+                                                {selectedCount === availableCount ? '✓ All' : 'Select All'}
+                                            </button>
+                                        </div>
+
+                                        {/* Group Categories */}
+                                        {isExpanded && (
+                                            <div className="px-2 pb-2 grid grid-cols-1 gap-1">
+                                                {group.categories.map(catName => {
+                                                    const cat = library.categories.find(c => c.name === catName);
+                                                    if (!cat) return null;
+
+                                                    return (
+                                                        <button
+                                                            key={cat.name}
+                                                            type="button"
+                                                            onClick={() => toggleCategory(cat.name)}
+                                                            className={cn(
+                                                                "text-left px-2 py-1.5 rounded text-xs transition-colors flex items-center justify-between",
+                                                                selectedCategories.includes(cat.name)
+                                                                    ? "bg-purple-600/30 text-purple-300 border border-purple-500/30"
+                                                                    : "bg-slate-900/50 text-slate-400 border border-slate-700/30 hover:bg-slate-800/50"
+                                                            )}
+                                                        >
+                                                            <span className="capitalize truncate">{cat.name.replace(/_/g, ' ')}</span>
+                                                            <span className="text-xs opacity-60 ml-2">{cat.count} Q's</span>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
                         </div>
                     </div>
                 )}

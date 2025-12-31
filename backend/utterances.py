@@ -121,7 +121,78 @@ UTTERANCE_LIBRARY: Dict[str, List[str]] = {
         "Lock my credit card",
         "Check my rewards points",
     ],
+    
+    # ============================================================================
+    # NEW CARD-FOCUSED CATEGORIES (High Volume Intents)
+    # ============================================================================
+    
+    "cards_dispute": [
+        "I want to dispute a charge on my card",
+        "There's a fraudulent transaction on my account",
+        "I didn't make this purchase",
+        "How do I file a dispute?",
+        "I was charged twice for the same transaction",
+        "This merchant charged me incorrectly",
+        "I returned an item but didn't get a refund",
+        "How long does a dispute take to resolve?",
+    ],
+    
+    "cards_balance_transfer": [
+        "How do I transfer a balance to my card?",
+        "What is the balance transfer fee?",
+        "What's the APR for balance transfers?",
+        "Can I transfer a balance from another bank?",
+        "How long does a balance transfer take?",
+        "What's the promotional rate for transfers?",
+        "Is there a limit on balance transfers?",
+        "Check my balance transfer offer",
+    ],
+    
+    "cards_replacement": [
+        "I need a replacement card",
+        "My card is damaged",
+        "Request a new card",
+        "My card chip doesn't work",
+        "How long until I get my new card?",
+        "Can I expedite my card delivery?",
+        "My card expired and I need a new one",
+        "The magnetic strip on my card is worn out",
+    ],
+    
+    "cards_update_contact": [
+        "Update my phone number on my card account",
+        "Change my billing address for my credit card",
+        "Update my email for card notifications",
+        "Change my mailing address for statements",
+        "Update my contact information",
+        "I moved and need to update my address",
+        "Change where my card statements are sent",
+        "Update my mobile number for alerts",
+    ],
+    
+    "travel_benefits": [
+        "What travel benefits does my card have?",
+        "I'm traveling abroad next week",
+        "Does my card have travel insurance?",
+        "Set a travel notification on my card",
+        "Do I have airport lounge access?",
+        "What's covered under travel protection?",
+        "I need to use my card internationally",
+        "Does my card offer rental car insurance?",
+    ],
+    
+    "rewards": [
+        "How many points do I have?",
+        "How do I redeem my rewards?",
+        "What's my cashback balance?",
+        "Transfer my points to travel partners",
+        "Can I use points for statement credit?",
+        "What rewards categories earn extra points?",
+        "When do my points expire?",
+        "How do I maximize my rewards?",
+    ],
 }
+
 
 # Expected intents for LLM evaluation context
 EXPECTED_INTENTS = {
@@ -138,7 +209,15 @@ EXPECTED_INTENTS = {
     "loans_offers": "The bot should provide loan information or pre-approval status",
     "fees_charges": "The bot should explain fees or help with fee waivers",
     "credit_card": "The bot should provide credit card balance, payment info, or help manage credit card settings",
+    # New card-focused intents
+    "cards_dispute": "The bot should help file a dispute, report fraudulent transactions, or explain the dispute process",
+    "cards_balance_transfer": "The bot should provide balance transfer rates, fees, limits, and help initiate transfers",
+    "cards_replacement": "The bot should help request a replacement card, track delivery, or expedite shipping",
+    "cards_update_contact": "The bot should help update contact information, billing address, or notification preferences",
+    "travel_benefits": "The bot should explain travel benefits, set travel notifications, or describe insurance coverage",
+    "rewards": "The bot should show rewards balance, explain redemption options, or describe earning categories",
 }
+
 
 
 def get_all_utterances() -> List[str]:

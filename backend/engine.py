@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import engine
-from models import TestRun, ConversationLog, Credentials, ChatbotConfig, LoginSelectors
-from llm_evaluator import evaluate_response, EvaluationResult, analyze_and_decide, AdaptiveDecision
+from models import TestRun, ConversationLog, Credentials, ChatbotConfig, LoginSelectors, get_local_now
+from llm_evaluator import evaluate_response, EvaluationResult, analyze_and_decide, AdaptiveDecision, analyze_screenshot_with_vision
 from utterances import get_category_for_utterance, get_expected_intent
 
 # Playwright configuration from environment
@@ -24,6 +24,200 @@ print(f"[ENGINE CONFIG] Headless={PLAYWRIGHT_HEADLESS}, SlowMo={PLAYWRIGHT_SLOW_
 # Citi credentials from .env (fallback if not provided in request)
 CITI_USER_ID = os.getenv("CITI_USER_ID", "")
 CITI_PASSWORD = os.getenv("CITI_PASSWORD", "")
+
+# Screenshot configuration
+SCREENSHOTS_DIR = os.path.join(os.path.dirname(__file__), "screenshots")
+CAPTURE_SCREENSHOTS = os.getenv("CAPTURE_SCREENSHOTS", "true").lower() == "true"
+
+
+def capture_screenshot(
+    page: Page,
+    test_run_id: int,
+    utterance: str,
+    status: str,
+    suffix: str = ""
+) -> str:
+    """
+    Capture a screenshot, especially on failures.
+    
+    Args:
+        page: Playwright page object
+        test_run_id: Test run ID for organization
+        utterance: The utterance being tested
+        status: Test status (pass/fail)
+        suffix: Optional suffix for filename
+    
+    Returns:
+        Path to saved screenshot, or empty string if not captured
+    """
+    if not CAPTURE_SCREENSHOTS:
+        return ""
+    
+    # Capture on failures, debug mode, or when suffix is provided
+    if status == "pass" and not suffix:
+        return ""
+    
+    try:
+        # Create directory for this test run
+        run_dir = os.path.join(SCREENSHOTS_DIR, f"run_{test_run_id}")
+        os.makedirs(run_dir, exist_ok=True)
+        
+        # Generate filename
+        timestamp = datetime.now().strftime("%H%M%S")
+        # Clean utterance for filename
+        clean_utterance = "".join(c if c.isalnum() else "_" for c in utterance[:30])
+        suffix_str = f"_{suffix}" if suffix else ""
+        filename = f"{timestamp}_{status}_{clean_utterance}{suffix_str}.png"
+        
+        filepath = os.path.join(run_dir, filename)
+        
+        # Capture screenshot
+        page.screenshot(path=filepath, full_page=True)
+        print(f"📸 Screenshot saved: {filepath}")
+        
+        return filepath
+        
+    except Exception as e:
+        print(f"Warning: Failed to capture screenshot: {e}")
+        return ""
+
+
+def get_screenshots_for_run(test_run_id: int) -> List[str]:
+    """
+    Get all screenshots for a test run.
+    
+    Args:
+        test_run_id: Test run ID
+    
+    Returns:
+        List of screenshot file paths
+    """
+    run_dir = os.path.join(SCREENSHOTS_DIR, f"run_{test_run_id}")
+    if not os.path.exists(run_dir):
+        return []
+    
+    screenshots = []
+    for filename in sorted(os.listdir(run_dir)):
+        if filename.endswith(".png"):
+            screenshots.append(os.path.join(run_dir, filename))
+    
+    return screenshots
+
+# Helper function to detect invalid bot responses
+import re
+
+# Invalid response patterns - these are not actual bot content
+INVALID_RESPONSE_PATTERNS = [
+    # Typing/loading indicators
+    r".*is typing.*",
+    r".*loading.*",
+    r".*please wait.*",
+    r".*one moment.*",
+    r".*thinking.*",
+    # Timestamps only
+    r"^\d{1,2}:\d{2}(\s*[APap][Mm])?$",
+    # Empty or placeholder text
+    r"^\.\.\.$",
+    r"^…$",
+]
+
+# Compiled patterns for efficiency
+INVALID_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in INVALID_RESPONSE_PATTERNS]
+
+# Keywords that indicate an invalid/incomplete response
+INVALID_RESPONSE_KEYWORDS = [
+    "is typing",
+    "loading",
+    "please wait",
+    "one moment",
+    "processing",
+    "connecting",
+]
+
+
+def is_invalid_response(text: str) -> bool:
+    """
+    Check if the text is an invalid bot response (typing indicator, timestamp, loading state).
+    Returns True if the response should be filtered out.
+    """
+    if not text:
+        return True
+    
+    text = text.strip()
+    
+    # Too short responses
+    if len(text) < 5:
+        return True
+    
+    # Check against invalid patterns
+    for pattern in INVALID_PATTERNS_COMPILED:
+        if pattern.match(text):
+            return True
+    
+    # Check against invalid keywords
+    text_lower = text.lower()
+    for keyword in INVALID_RESPONSE_KEYWORDS:
+        if keyword in text_lower:
+            return True
+    
+    # Check if it's just a timestamp (short text with time format)
+    if len(text) < 15:
+        time_pattern = r'^\d{1,2}:\d{2}(\s*[APap][Mm])?$'
+        if re.match(time_pattern, text):
+            return True
+    
+    return False
+
+
+def is_valid_balance_response(response: str) -> bool:
+    """
+    Check if the response contains meaningful balance information.
+    Used for enhanced success criteria validation.
+    """
+    if not response:
+        return False
+    
+    response_lower = response.lower()
+    
+    # Check for monetary amounts
+    has_amount = bool(re.search(r'\$[\d,]+\.?\d*', response))
+    
+    # Check for account-related keywords
+    account_keywords = ['balance', 'account', 'card', 'available', 'credit', 'checking', 'savings']
+    has_account_ref = any(kw in response_lower for kw in account_keywords)
+    
+    # Check for actionable information (menu options count as valid)
+    action_keywords = ['go to', 'view', 'see', 'check', 'select', 'click']
+    has_action = any(kw in response_lower for kw in action_keywords)
+    
+    return has_amount or (has_account_ref and has_action) or has_account_ref
+
+
+def get_response_quality_score(response: str, category: str) -> float:
+    """
+    Get a quality score (0-10) for a response based on content analysis.
+    Used when LLM evaluation is unavailable.
+    """
+    if not response or is_invalid_response(response):
+        return 0.0
+    
+    score = 5.0  # Base score for having a response
+    
+    # Category-specific scoring
+    if category == "account_balance":
+        if is_valid_balance_response(response):
+            score += 3.0
+        if re.search(r'\$[\d,]+', response):
+            score += 2.0
+    elif category in ["transactions", "payments"]:
+        if any(kw in response.lower() for kw in ['transaction', 'payment', 'amount', 'date']):
+            score += 3.0
+    elif category == "card_issues":
+        if any(kw in response.lower() for kw in ['card', 'lock', 'report', 'replace']):
+            score += 3.0
+    
+    return min(score, 10.0)
+
 
 # Keywords that indicate escalation to human support
 ESCALATION_KEYWORDS = [
@@ -39,6 +233,296 @@ def detect_escalation(response: str) -> bool:
     """Check if bot response contains escalation keywords."""
     response_lower = response.lower()
     return any(keyword in response_lower for keyword in ESCALATION_KEYWORDS)
+
+
+# Patterns for text that should be filtered out (menu buttons, not actual bot messages)
+BUTTON_TEXT_PATTERNS = [
+    r"^my credit card$",
+    r"^my atm.*debit card$",
+    r"^my banking account$",
+    r"^yes$",
+    r"^no$",
+    r"^confirm$",
+    r"^cancel$",
+    r"^continue$",
+    r"^done$",
+    r"^ok$",
+    r"^okay$",
+    r"^go to",
+    r"^view account",
+    r"^see more",
+    r"^request cash advance",
+    r"^atm.*branch locator",
+    r"card\.{3}\d{4}$",  # "Card...1234" pattern
+    r"checking\.{3}\d{4}$",
+    r"savings\.{3}\d{4}$",
+    r"account isn.t listed",
+]
+
+
+def is_button_text(text: str) -> bool:
+    """Check if the text looks like a button label rather than bot message."""
+    if not text:
+        return False
+    text_lower = text.lower().strip()
+    for pattern in BUTTON_TEXT_PATTERNS:
+        if re.match(pattern, text_lower, re.IGNORECASE):
+            return True
+    return False
+
+
+def extract_bot_narrative_text(page: Page) -> str:
+    """
+    Extract ONLY narrative/conversational text from bot messages.
+    Excludes button labels, menu options, and clickable elements.
+    
+    Uses JavaScript DOM traversal to walk through text nodes and 
+    filter out those that belong to clickable elements.
+    
+    Args:
+        page: Playwright page object
+        
+    Returns:
+        The narrative text from the bot's response
+    """
+    try:
+        result = page.evaluate("""
+            () => {
+                // Find the most recent bot message container
+                const botMessageSelectors = [
+                    '[class*="bot-message"]',
+                    '[class*="assistant-message"]',
+                    '[class*="from-bot"]',
+                    '[class*="incoming-message"]',
+                    '[class*="chat-message"]:not([class*="user"])',
+                    '[class*="message-bubble"]:not([class*="user"])'
+                ];
+                
+                let latestBotMessage = null;
+                for (const selector of botMessageSelectors) {
+                    const elements = document.querySelectorAll(selector);
+                    if (elements.length > 0) {
+                        latestBotMessage = elements[elements.length - 1];
+                        break;
+                    }
+                }
+                
+                if (!latestBotMessage) {
+                    // Fallback: look in chat container for last non-user message
+                    const chatContainer = document.querySelector(
+                        '[class*="chat-widget"], [class*="chat-container"], [class*="messaging"]'
+                    );
+                    if (chatContainer) {
+                        const allMessages = chatContainer.querySelectorAll('[class*="message"]');
+                        for (let i = allMessages.length - 1; i >= 0; i--) {
+                            const msg = allMessages[i];
+                            const classes = msg.className.toLowerCase();
+                            if (!classes.includes('user') && !classes.includes('outgoing')) {
+                                latestBotMessage = msg;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (!latestBotMessage) {
+                    return { narrative: '', buttonLabels: [], found: false };
+                }
+                
+                // Patterns for clickable elements to skip
+                const clickableSelectors = 'button, [role="button"], a, [onclick], [tabindex="0"], [class*="chip"], [class*="option"], [class*="selection"]';
+                
+                // Patterns for button-like text to filter
+                const buttonPatterns = [
+                    /^my credit card$/i,
+                    /^my atm.*debit card$/i,
+                    /^my banking account$/i,
+                    /^yes$/i, /^no$/i,
+                    /^confirm$/i, /^cancel$/i,
+                    /^continue$/i, /^done$/i,
+                    /^ok$/i, /^okay$/i,
+                    /^go to/i, /^view account/i,
+                    /^see more/i, /^request cash/i,
+                    /card\\.{3}\\d{4}$/i,
+                    /checking\\.{3}\\d{4}$/i,
+                    /savings\\.{3}\\d{4}$/i,
+                    /account isn.t listed/i,
+                    /^sign off$/i, /^sign on$/i
+                ];
+                
+                const narrativeTexts = [];
+                const buttonLabels = [];
+                
+                // Walk through all text nodes
+                const walker = document.createTreeWalker(
+                    latestBotMessage,
+                    NodeFilter.SHOW_TEXT,
+                    null,
+                    false
+                );
+                
+                while (walker.nextNode()) {
+                    const textNode = walker.currentNode;
+                    const text = textNode.textContent.trim();
+                    
+                    if (!text || text.length < 2) continue;
+                    
+                    // Check if this text node is inside a clickable element
+                    let parent = textNode.parentElement;
+                    let isClickable = false;
+                    while (parent && parent !== latestBotMessage) {
+                        if (parent.matches && parent.matches(clickableSelectors)) {
+                            isClickable = true;
+                            break;
+                        }
+                        parent = parent.parentElement;
+                    }
+                    
+                    // Check if text matches button patterns
+                    const isButtonText = buttonPatterns.some(p => p.test(text));
+                    
+                    if (isClickable || isButtonText) {
+                        buttonLabels.push(text);
+                    } else {
+                        narrativeTexts.push(text);
+                    }
+                }
+                
+                // Join narrative texts, filtering duplicates
+                const seen = new Set();
+                const uniqueNarrative = narrativeTexts.filter(t => {
+                    if (seen.has(t.toLowerCase())) return false;
+                    seen.add(t.toLowerCase());
+                    return true;
+                });
+                
+                return {
+                    narrative: uniqueNarrative.join(' ').trim(),
+                    buttonLabels: buttonLabels,
+                    found: true
+                };
+            }
+        """)
+        
+        if result and result.get('found'):
+            narrative = result.get('narrative', '')
+            buttons = result.get('buttonLabels', [])
+            if buttons:
+                print(f"[BotNarrative] Filtered out button text: {buttons[:3]}")
+            if narrative:
+                print(f"[BotNarrative] Extracted: {narrative[:80]}...")
+            return narrative
+        return ""
+        
+    except Exception as e:
+        print(f"[BotNarrative] Error extracting narrative: {e}")
+        return ""
+
+
+def filter_button_text_from_response(raw_response: str) -> str:
+    """
+    Filter out button/menu text from a raw response string.
+    This is a fallback when JavaScript DOM traversal isn't possible.
+    
+    Args:
+        raw_response: Raw text that may contain button labels
+        
+    Returns:
+        Cleaned text with button labels removed
+    """
+    if not raw_response:
+        return ""
+    
+    # Split by common separators and filter each part
+    parts = re.split(r'\s{2,}|\n', raw_response)
+    filtered = []
+    
+    for part in parts:
+        part = part.strip()
+        if part and not is_button_text(part):
+            filtered.append(part)
+    
+    # If everything was filtered, return original (better than nothing)
+    if not filtered:
+        return raw_response
+    
+    return ' '.join(filtered)
+
+def wait_for_stable_response(page: Page, timeout_ms: int = 10000, check_interval_ms: int = 500) -> str:
+    """
+    Wait for bot response to stabilize (no changes for 500ms).
+    This helps ensure we capture the final response, not intermediate states.
+    
+    ENHANCED: Now uses extract_bot_narrative_text to filter out button labels
+    and capture only the actual bot message content.
+    
+    Args:
+        page: Playwright page object
+        timeout_ms: Maximum time to wait in milliseconds
+        check_interval_ms: Interval between stability checks
+        
+    Returns:
+        Stable bot response text or empty string
+    """
+    response_selectors = [
+        "[class*='message-content']",
+        "[class*='chat-message']",
+        "[class*='bot-message']",
+        "[class*='assistant-message']",
+        "[class*='bubble']",
+        "[class*='response']",
+        "[class*='message']:not([class*='user'])",
+    ]
+    
+    last_response = ""
+    stable_count = 0
+    required_stable_checks = 2  # Response must be the same for 2 consecutive checks
+    
+    elapsed = 0
+    while elapsed < timeout_ms:
+        current_response = ""
+        
+        # FIRST: Try to extract clean narrative text using DOM traversal
+        try:
+            narrative = extract_bot_narrative_text(page)
+            if narrative and len(narrative) > 15 and not is_invalid_response(narrative):
+                current_response = narrative
+        except Exception as e:
+            print(f"[StableResponse] Narrative extraction failed: {e}")
+        
+        # FALLBACK: Use selector-based approach if narrative is empty
+        if not current_response:
+            for selector in response_selectors:
+                try:
+                    elements = page.query_selector_all(selector)
+                    if elements:
+                        latest = elements[-1]
+                        raw_text = (latest.text_content() or "").strip()
+                        if raw_text and len(raw_text) > 10:
+                            # Filter out button text from raw response
+                            filtered = filter_button_text_from_response(raw_text)
+                            if filtered and len(filtered) > 10 and not is_invalid_response(filtered):
+                                current_response = filtered
+                                break
+                except Exception:
+                    continue
+        
+        # Check if response is stable
+        if current_response and current_response == last_response:
+            stable_count += 1
+            if stable_count >= required_stable_checks:
+                print(f"[StableResponse] Stable after {elapsed}ms: {current_response[:60]}...")
+                return current_response
+        else:
+            stable_count = 0
+            last_response = current_response
+        
+        page.wait_for_timeout(check_interval_ms)
+        elapsed += check_interval_ms
+    
+    if last_response:
+        print(f"[StableResponse] Timeout, returning last: {last_response[:60]}...")
+    return last_response if last_response else ""
 
 
 def run_citi_chatbot_test(
@@ -158,7 +642,7 @@ def run_citi_chatbot_test(
             test_run = session.get(TestRun, test_run_id)
             if test_run:
                 test_run.status = "failed"
-                test_run.completed_at = datetime.utcnow()
+                test_run.completed_at = get_local_now()
                 test_run.error_message = str(e)
                 session.add(test_run)
                 session.commit()
@@ -1371,8 +1855,8 @@ def process_utterance_with_llm(
                     # Get the last message content
                     for msg in reversed(all_messages):
                         text = (msg.text_content() or "").strip()
-                        # Skip if it's the user's utterance or empty
-                        if text and text != utterance and len(text) > 5:
+                        # Skip if it's the user's utterance, empty, or just a timestamp
+                        if text and text != utterance and len(text) > 10 and not is_invalid_response(text):
                             bot_response = text
                             break
             except Exception:
@@ -1388,7 +1872,7 @@ def process_utterance_with_llm(
                     if elements:
                         latest = elements[-1]
                         text = (latest.text_content() or "").strip()
-                        if text and text != utterance and len(text) > 5:
+                        if text and text != utterance and len(text) > 10 and not is_invalid_response(text):
                             bot_response = text
                             break
                 except Exception:
@@ -1426,7 +1910,7 @@ def process_utterance_with_llm(
             latency_ms=latency_ms,
             status=status,
             category=category,
-            timestamp=datetime.utcnow(),
+            timestamp=get_local_now(),
             # LLM evaluation fields
             relevance_score=evaluation.relevance_score if evaluation else None,
             helpfulness_score=evaluation.helpfulness_score if evaluation else None,
@@ -1456,7 +1940,7 @@ def process_utterance_with_llm(
             latency_ms=0,
             status="error",
             category=get_category_for_utterance(utterance),
-            timestamp=datetime.utcnow()
+            timestamp=get_local_now()
         )
         session.add(log)
         session.commit()
@@ -1498,7 +1982,7 @@ def update_test_run_metrics(
     
     # Update test run
     test_run.status = "completed"
-    test_run.completed_at = datetime.utcnow()
+    test_run.completed_at = get_local_now()
     test_run.total_utterances = total
     test_run.avg_latency_ms = round(avg_latency, 2)
     test_run.self_service_rate = round(self_service_rate, 2)
@@ -1526,175 +2010,594 @@ def run_chatbot_test(
 
 # ============ ADAPTIVE TESTING FUNCTIONS ============
 
-def extract_menu_options(page: Page) -> List[str]:
+def extract_menu_options(page: Page, wait_for_options: bool = True) -> List[str]:
     """
-    Extract clickable menu options from WITHIN the chat widget ONLY.
-    Ignores all dashboard elements completely.
+    Extract clickable menu options from WITHIN the chat widget.
+    
+    Enhanced version that:
+    1. Uses JavaScript for reliable DOM detection
+    2. Detects various clickable element types (buttons, links, chips)
+    3. Waits for options to appear after bot questions
+    4. Has smarter filtering logic
+    
+    Args:
+        page: Playwright page object
+        wait_for_options: If True, wait extra time for menu options to appear
+        
+    Returns:
+        List of clickable option text strings
     """
     menu_options = []
     
-    # First, find the chat widget container
-    # The Citi Bot chat is typically in a specific container with identifiable classes
-    chat_container_selectors = [
-        "[class*='citi-bot']",
-        "[class*='chat-widget']",
-        "[class*='chat-container']",
-        "[class*='chatbot']",
-        "[class*='chat-window']",
-        "[class*='messaging']",
-        "[id*='chat']",
-        "[aria-label*='chat' i]",
-        # Look for container that has the message input
-        ":has(input[placeholder*='message' i])",
-        ":has(textarea[placeholder*='message' i])",
-    ]
+    # If waiting for options, give time for them to render after bot response
+    if wait_for_options:
+        page.wait_for_timeout(1500)
     
-    chat_container = None
-    for selector in chat_container_selectors:
-        try:
-            container = page.locator(selector).first
-            if container.is_visible(timeout=500):
-                chat_container = container
-                print(f"Found chat container: {selector}")
-                break
-        except Exception:
-            continue
+    # Use JavaScript for more reliable detection - this handles dynamic content better
+    try:
+        options_data = page.evaluate("""
+            () => {
+                const options = [];
+                const seen = new Set();
+                
+                // Skip patterns - navigation and action buttons we don't want to click
+                const skipPatterns = [
+                    /^send$/i, /^submit$/i, /^close$/i, /^x$/i, /^minimize$/i,
+                    /^sign off$/i, /^sign on$/i, /^help$/i, /^menu$/i,
+                    /^see more$/i, /^learn more$/i, /^view account$/i,
+                    /^go to/i, /^navigate/i, /^open$/i,
+                    /thumbs (up|down)/i, /was this helpful/i,
+                    /^read$/i, /^today/i
+                ];
+                
+                // Account-related patterns we definitely want to capture
+                const accountPatterns = [
+                    /card/i, /citi/i, /checking/i, /savings/i,
+                    /strata/i, /double cash/i, /custom cash/i,
+                    /\\.{3}\\d{4}$/,  // Matches "...1234" pattern
+                    /account.*\\d{4}/i
+                ];
+                
+                // Action patterns we want to capture for multi-turn flows
+                const actionPatterns = [
+                    /balance/i, /payment/i, /dispute/i, /reward/i,
+                    /replace/i, /lock/i, /unlock/i, /transfer/i,
+                    /isn't listed/i, /not listed/i
+                ];
+                
+                // Confirmation patterns - Yes/No buttons for confirmations
+                const confirmationPatterns = [
+                    /^yes$/i, /^no$/i, /^confirm$/i, /^cancel$/i,
+                    /^ok$/i, /^okay$/i, /^continue$/i, /^done$/i,
+                    /^agree$/i, /^decline$/i, /^accept$/i, /^reject$/i,
+                    /^that's right$/i, /^that's correct$/i,
+                    /^that's not right$/i, /^not correct$/i
+                ];
+                
+                // Find the chat container first
+                const chatContainerSelectors = [
+                    '[class*="citi"][class*="bot"]',
+                    '[class*="chat-widget"]', 
+                    '[class*="chat-container"]',
+                    '[class*="chatbot"]',
+                    '[class*="messaging"]',
+                    '[id*="chat"]',
+                    '[class*="dialog"][class*="bot"]'
+                ];
+                
+                let chatContainer = null;
+                for (const selector of chatContainerSelectors) {
+                    const el = document.querySelector(selector);
+                    if (el && el.offsetParent !== null) {
+                        chatContainer = el;
+                        break;
+                    }
+                }
+                
+                // If no chat container, search entire page but be more careful
+                const searchRoot = chatContainer || document.body;
+                
+                // Selectors for clickable elements that could be menu options
+                const clickableSelectors = [
+                    // Buttons and button-like elements
+                    'button:not([disabled])',
+                    '[role="button"]',
+                    '[role="option"]',
+                    '[role="listitem"]',
+                    
+                    // Links that look like options
+                    'a[href="#"]',
+                    'a:not([href^="http"]):not([href^="/"])',
+                    
+                    // Chip/pill style elements
+                    '[class*="chip"]',
+                    '[class*="pill"]',
+                    '[class*="tag"]',
+                    
+                    // Quick reply / suggestion elements
+                    '[class*="quick-reply"]',
+                    '[class*="quickreply"]',
+                    '[class*="suggestion"]',
+                    '[class*="option"]',
+                    '[class*="choice"]',
+                    
+                    // Citi-specific patterns
+                    '[class*="account-option"]',
+                    '[class*="account-item"]',
+                    '[class*="selection"]',
+                    '[class*="selectable"]',
+                    
+                    // Clickable divs/spans often used for chat options
+                    '[onclick]',
+                    '[class*="clickable"]',
+                    '[tabindex="0"]'
+                ];
+                
+                for (const selector of clickableSelectors) {
+                    try {
+                        const elements = searchRoot.querySelectorAll(selector);
+                        for (const el of elements) {
+                            // Skip invisible elements
+                            if (el.offsetParent === null && el.style.position !== 'fixed') continue;
+                            
+                            // Get text content
+                            let text = (el.textContent || '').trim();
+                            
+                            // Clean up text - remove extra whitespace
+                            text = text.replace(/\\s+/g, ' ').trim();
+                            
+                            // Skip if already seen, too short, or too long
+                            if (seen.has(text.toLowerCase())) continue;
+                            
+                            // Check if it matches confirmation patterns FIRST (allows short text like "Yes", "No")
+                            const isConfirmation = confirmationPatterns.some(p => p.test(text));
+                            
+                            // Skip based on length - but allow short confirmations like "Yes", "No", "Ok"
+                            if (!isConfirmation && (text.length < 3 || text.length > 80)) continue;
+                            if (isConfirmation && text.length > 20) continue;  // Confirmations shouldn't be too long
+                            
+                            // Skip if matches skip patterns
+                            if (skipPatterns.some(p => p.test(text))) continue;
+                            
+                            // Skip transaction entries (have $ with dates)
+                            if (text.includes('$') && (/posted/i.test(text) || /\\d{1,2}[,\\/]\\s*\\d{4}/.test(text))) continue;
+                            
+                            // Skip timestamp-only text
+                            if (/^\\d{1,2}:\\d{2}\\s*(am|pm)?$/i.test(text)) continue;
+                            
+                            // Check if it matches account or action patterns - these we definitely want
+                            const isAccountOption = accountPatterns.some(p => p.test(text));
+                            const isActionOption = actionPatterns.some(p => p.test(text));
+                            
+                            // For elements in chat container, be more permissive
+                            // For elements outside, only accept if they match known patterns
+                            if (chatContainer || isAccountOption || isActionOption || isConfirmation) {
+                                seen.add(text.toLowerCase());
+                                options.push({
+                                    text: text,
+                                    isAccount: isAccountOption,
+                                    isAction: isActionOption,
+                                    isConfirmation: isConfirmation,
+                                    tag: el.tagName,
+                                    classes: el.className.substring(0, 50)
+                                });
+                            }
+                        }
+                    } catch (e) {
+                        // Selector might not be valid, continue
+                    }
+                }
+                
+                return options;
+            }
+        """)
+        
+        if options_data:
+            print(f"[MenuOptions] JavaScript found {len(options_data)} potential options:")
+            for opt in options_data[:8]:
+                flags = []
+                if opt.get('isAccount'): flags.append('account')
+                if opt.get('isAction'): flags.append('action')
+                if opt.get('isConfirmation'): flags.append('confirm')
+                flags_str = ','.join(flags) if flags else 'other'
+                print(f"  - '{opt['text'][:40]}' ({flags_str}, tag={opt['tag']})")
+            
+            # Prioritize: account options → action options → confirmations → others
+            account_opts = [o['text'] for o in options_data if o.get('isAccount')]
+            action_opts = [o['text'] for o in options_data if o.get('isAction') and o['text'] not in account_opts]
+            confirm_opts = [o['text'] for o in options_data if o.get('isConfirmation') and o['text'] not in account_opts and o['text'] not in action_opts]
+            other_opts = [o['text'] for o in options_data if not o.get('isAccount') and not o.get('isAction') and not o.get('isConfirmation')]
+            
+            # Combine with priority ordering
+            menu_options = account_opts + action_opts + confirm_opts + other_opts[:5]  # Limit others
+            
+    except Exception as e:
+        print(f"[MenuOptions] JavaScript extraction failed: {e}")
     
-    if not chat_container:
-        print("Could not find chat widget container - returning empty menu options")
-        return []
+    # Fallback: Use Playwright locators if JavaScript found nothing
+    if not menu_options:
+        print("[MenuOptions] Fallback to Playwright locators...")
+        
+        fallback_selectors = [
+            "button:has-text('Card')",
+            "button:has-text('Citi')",
+            "button:has-text('Checking')",
+            "button:has-text('Savings')",
+            "[role='button']:has-text('Card')",
+            "a:has-text('Card')",
+            "[class*='option']:has-text('Card')",
+        ]
+        
+        for selector in fallback_selectors:
+            try:
+                elements = page.locator(selector)
+                count = elements.count()
+                for i in range(min(count, 5)):
+                    try:
+                        el = elements.nth(i)
+                        if el.is_visible(timeout=300):
+                            text = (el.text_content() or "").strip()
+                            if text and text not in menu_options and len(text) < 80:
+                                menu_options.append(text)
+                                print(f"  Fallback found: '{text[:40]}' via {selector}")
+                    except Exception:
+                        continue
+            except Exception:
+                continue
     
-    # Now search for menu options ONLY within the chat container
-    # These are response option buttons the bot presents
-    within_chat_selectors = [
-        "button",
-        "[role='button']",
-        "[class*='option']",
-        "[class*='choice']",
-        "[class*='chip']",
-        "[class*='quick-reply']",
-        "[class*='suggestion']",
-    ]
+    # Deduplicate while preserving order
+    seen = set()
+    unique_options = []
+    for opt in menu_options:
+        opt_lower = opt.lower()
+        if opt_lower not in seen:
+            seen.add(opt_lower)
+            unique_options.append(opt)
     
-    # Skip keywords - these are NOT valid chat menu options
-    skip_keywords = [
-        "send", "submit", "close", "minimize", "x", 
-        "view", "go to", "open", "navigate", "see more", "learn more",
-        "sign off", "help", "menu",
-    ]
-    
-    for selector in within_chat_selectors:
-        try:
-            # Search ONLY within the chat container
-            elements = chat_container.locator(selector)
-            count = elements.count()
-            for i in range(min(count, 10)):
-                try:
-                    el = elements.nth(i)
-                    if el.is_visible(timeout=300):
-                        text = (el.text_content() or "").strip()
-                        text_lower = text.lower()
-                        
-                        # Skip if too short, too long, empty, or contains skip keywords
-                        if len(text) < 3 or len(text) > 60:
-                            continue
-                        if any(kw in text_lower for kw in skip_keywords):
-                            continue
-                        # Skip transaction-like text (has dollar amounts with dates)
-                        if "$" in text and ("posted" in text_lower or "20" in text):
-                            continue
-                        
-                        if text not in menu_options:
-                            menu_options.append(text)
-                except Exception:
-                    continue
-        except Exception:
-            continue
-    
-    # Filter to keep only likely valid options (credit card names, action terms)
-    valid_patterns = ["card", "balance", "payment", "citi", "strata", "cash", "double"]
-    if menu_options:
-        # If we have many options, filter to those matching valid patterns
-        filtered = [opt for opt in menu_options if any(p in opt.lower() for p in valid_patterns)]
-        if filtered:
-            menu_options = filtered
-    
-    print(f"Extracted {len(menu_options)} menu options from chat widget: {menu_options[:3]}...")
-    return menu_options
+    print(f"[MenuOptions] Final: {len(unique_options)} options - {unique_options[:5]}")
+    return unique_options
 
 
 def click_menu_option(page: Page, option_text: str) -> bool:
     """
-    Click a menu option by its text WITHIN the chat widget only.
-    Returns True if clicked successfully.
+    Click a menu option by its text.
+    
+    Enhanced version with multiple strategies:
+    1. Exact text match via Playwright
+    2. Partial/contains text match
+    3. JavaScript-based click with fuzzy matching
+    4. Debug screenshot on failure
+    
+    ENHANCED: Added post-click verification to ensure DOM changed.
+    
+    Args:
+        page: Playwright page object
+        option_text: Text of the option to click
+        
+    Returns:
+        True if clicked successfully, False otherwise
     """
-    try:
-        # First, find the chat widget container
-        chat_container_selectors = [
-            "[class*='citi-bot']",
-            "[class*='chat-widget']",
-            "[class*='chat-container']",
-            "[class*='chatbot']",
-            "[class*='chat-window']",
-            ":has(input[placeholder*='message' i])",
-        ]
+    print(f"[ClickMenu] Attempting to click: '{option_text}'")
+    
+    # Capture menu options before click to verify change
+    def get_current_options():
+        try:
+            return extract_menu_options(page, wait_for_options=False)
+        except:
+            return []
+    
+    options_before = get_current_options()
+    
+    def verify_click_success():
+        """Check if DOM changed after click (new response or different options)."""
+        page.wait_for_timeout(1000)
+        options_after = get_current_options()
         
-        chat_container = None
-        for selector in chat_container_selectors:
-            try:
-                container = page.locator(selector).first
-                if container.is_visible(timeout=500):
-                    chat_container = container
-                    break
-            except Exception:
-                continue
-        
-        if not chat_container:
-            print(f"Could not find chat container to click menu option")
-            # Fall back to page-wide search
-            chat_container = page
-        
-        # Try to find and click the button within chat container
-        selectors = [
-            f"button:has-text('{option_text}')",
-            f"[role='button']:has-text('{option_text}')",
-        ]
-        
-        for selector in selectors:
-            try:
-                el = chat_container.locator(selector).first
-                if el.is_visible(timeout=1000):
-                    el.click(force=True)
-                    print(f"Clicked menu option in chat: '{option_text}'")
-                    return True
-            except Exception:
-                continue
-        
-        # JavaScript fallback - scope to chat container
-        result = page.evaluate(f"""
-            () => {{
-                // Find chat container first
-                const chatContainers = document.querySelectorAll('[class*="chat"], [class*="citi-bot"]');
-                for (const container of chatContainers) {{
-                    const buttons = container.querySelectorAll('button, [role="button"]');
-                    for (const btn of buttons) {{
-                        if (btn.textContent?.includes('{option_text}')) {{
-                            btn.click();
-                            return true;
-                        }}
-                    }}
-                }}
-                return false;
-            }}
-        """)
-        if result:
-            print(f"Clicked menu option via JS in chat: '{option_text}'")
+        # Success if: options changed, or we got a new bot narrative
+        if set(options_after) != set(options_before):
             return True
+        
+        # Also check if bot response changed
+        try:
+            narrative = extract_bot_narrative_text(page)
+            if narrative and len(narrative) > 15:
+                # There's some narrative response, likely successful
+                return True
+        except:
+            pass
+        
+        return False
+    
+    # Strategy 1: Direct Playwright text match (various element types)
+    direct_selectors = [
+        f"button:has-text('{option_text}')",
+        f"a:has-text('{option_text}')",
+        f"[role='button']:has-text('{option_text}')",
+        f"[role='option']:has-text('{option_text}')",
+        f"[role='listitem']:has-text('{option_text}')",
+        f"[class*='option']:has-text('{option_text}')",
+        f"[class*='chip']:has-text('{option_text}')",
+        f"[tabindex='0']:has-text('{option_text}')",
+    ]
+    
+    for selector in direct_selectors:
+        try:
+            el = page.locator(selector).first
+            if el.is_visible(timeout=1000):
+                el.scroll_into_view_if_needed()
+                page.wait_for_timeout(200)
+                el.click(force=True)
+                print(f"[ClickMenu] SUCCESS via Playwright: '{option_text}' using {selector}")
+                page.wait_for_timeout(1500)  # Wait for response after click
+                
+                # Verify the click worked
+                if verify_click_success():
+                    print(f"[ClickMenu] Verified: DOM changed after click")
+                    return True
+                else:
+                    print(f"[ClickMenu] Warning: Click may not have registered, trying alternative...")
+                    # Continue to try other methods
+        except Exception as e:
+            continue
+    
+    # Strategy 2: Partial text match (useful for truncated text like "Citi Double Cash...")
+    # Extract a unique substring to match
+    partial_text = option_text[:20] if len(option_text) > 20 else option_text
+    partial_selectors = [
+        f"button:has-text('{partial_text}')",
+        f"a:has-text('{partial_text}')",
+        f"[role='button']:has-text('{partial_text}')",
+    ]
+    
+    for selector in partial_selectors:
+        try:
+            elements = page.locator(selector)
+            count = elements.count()
+            for i in range(min(count, 5)):
+                el = elements.nth(i)
+                if el.is_visible(timeout=500):
+                    text = (el.text_content() or "").strip()
+                    # Check if this is the right match
+                    if option_text.lower() in text.lower() or text.lower() in option_text.lower():
+                        el.scroll_into_view_if_needed()
+                        page.wait_for_timeout(200)
+                        el.click(force=True)
+                        print(f"[ClickMenu] SUCCESS via partial match: '{text[:40]}' using {selector}")
+                        page.wait_for_timeout(1500)
+                        
+                        if verify_click_success():
+                            return True
+        except Exception:
+            continue
+    
+    # Strategy 3: JavaScript-based click with case-insensitive matching
+    # This is more flexible and handles dynamic elements better
+    try:
+        js_result = page.evaluate("""
+            (targetText) => {
+                const searchText = targetText.toLowerCase();
+                
+                // Selectors to search (in priority order)
+                const selectors = [
+                    'button', 'a', '[role="button"]', '[role="option"]',
+                    '[class*="chip"]', '[class*="option"]', '[class*="selection"]',
+                    '[tabindex="0"]', '[onclick]'
+                ];
+                
+                for (const selector of selectors) {
+                    const elements = document.querySelectorAll(selector);
+                    for (const el of elements) {
+                        // Skip hidden elements
+                        if (el.offsetParent === null && el.style.position !== 'fixed') continue;
+                        
+                        const elText = (el.textContent || '').trim().toLowerCase();
+                        
+                        // Check for exact match or contains match
+                        if (elText === searchText || 
+                            elText.includes(searchText) || 
+                            searchText.includes(elText)) {
+                            
+                            // Scroll into view first
+                            el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                            
+                            // Try to dispatch a proper click event
+                            const event = new MouseEvent('click', {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window
+                            });
+                            el.dispatchEvent(event);
+                            
+                            return {
+                                success: true,
+                                clickedText: el.textContent.trim().substring(0, 50),
+                                selector: selector
+                            };
+                        }
+                    }
+                }
+                
+                return { success: false };
+            }
+        """, option_text)
+        
+        if js_result and js_result.get('success'):
+            print(f"[ClickMenu] SUCCESS via JavaScript: '{js_result.get('clickedText')}' using {js_result.get('selector')}")
+            page.wait_for_timeout(1500)
+            
+            if verify_click_success():
+                return True
             
     except Exception as e:
-        print(f"Failed to click menu option '{option_text}': {e}")
+        print(f"[ClickMenu] JavaScript click failed: {e}")
+    
+    # Strategy 4: Try clicking by exact text with get_by_text
+    try:
+        el = page.get_by_text(option_text, exact=False).first
+        if el.is_visible(timeout=1000):
+            el.click(force=True)
+            print(f"[ClickMenu] SUCCESS via get_by_text: '{option_text}'")
+            page.wait_for_timeout(1500)
+            
+            if verify_click_success():
+                return True
+    except Exception:
+        pass
+    
+    # Strategy 5: Double-click as last resort (some chat widgets need this)
+    try:
+        el = page.get_by_text(option_text, exact=False).first
+        if el.is_visible(timeout=500):
+            el.dblclick(force=True)
+            print(f"[ClickMenu] Trying double-click: '{option_text}'")
+            page.wait_for_timeout(1500)
+            
+            if verify_click_success():
+                return True
+    except Exception:
+        pass
+    
+    # Failed - capture debug screenshot
+    print(f"[ClickMenu] FAILED to click: '{option_text}'")
+    try:
+        screenshot_path = f"/tmp/click_menu_failed_{option_text[:20].replace(' ', '_')}.png"
+        page.screenshot(path=screenshot_path)
+        print(f"[ClickMenu] Debug screenshot saved: {screenshot_path}")
+    except Exception:
+        pass
     
     return False
+
+
+def wait_for_menu_options(page: Page, timeout_ms: int = 5000) -> List[str]:
+    """
+    Wait for menu options to appear after a bot response.
+    
+    This is useful when the bot asks a clarifying question and we need
+    to wait for the clickable options to render.
+    
+    Args:
+        page: Playwright page object
+        timeout_ms: Maximum time to wait for options
+        
+    Returns:
+        List of menu option texts found
+    """
+    print(f"[WaitForMenu] Waiting up to {timeout_ms}ms for menu options...")
+    
+    elapsed = 0
+    check_interval = 500
+    last_count = 0
+    stable_checks = 0
+    
+    while elapsed < timeout_ms:
+        # Extract current menu options (without waiting)
+        options = extract_menu_options(page, wait_for_options=False)
+        
+        if options:
+            # Check if options are stable (same count for 2 checks)
+            if len(options) == last_count:
+                stable_checks += 1
+                if stable_checks >= 2:
+                    print(f"[WaitForMenu] Found {len(options)} stable options after {elapsed}ms")
+                    return options
+            else:
+                stable_checks = 0
+                last_count = len(options)
+        
+        page.wait_for_timeout(check_interval)
+        elapsed += check_interval
+    
+    # Return whatever we have after timeout
+    final_options = extract_menu_options(page, wait_for_options=False)
+    print(f"[WaitForMenu] Timeout reached, returning {len(final_options)} options")
+    return final_options
+
+
+def detect_clarifying_question(bot_response: str) -> bool:
+    """
+    Detect if the bot is asking a clarifying question that expects user selection.
+    
+    Args:
+        bot_response: The bot's response text
+        
+    Returns:
+        True if bot is asking for clarification/selection
+    """
+    if not bot_response:
+        return False
+    
+    response_lower = bot_response.lower()
+    
+    # Patterns that indicate bot is asking for user selection or confirmation
+    clarifying_patterns = [
+        # Account selection patterns
+        "which account",
+        "which card",
+        "select an account",
+        "choose an account",
+        "would you like to check",
+        "would you like to",
+        "please select",
+        "please choose",
+        "here are",
+        "here's a list",
+        "following options",
+        "you can select",
+        "pick one",
+        # Confirmation question patterns (Yes/No expected)
+        "is this correct",
+        "is that correct",
+        "is this right",
+        "is that right",
+        "does this look right",
+        "confirm your",
+        "would you like to continue",
+        "do you want to",
+        "should i proceed",
+        "is this the account",
+        "is this the card",
+    ]
+    
+    return any(pattern in response_lower for pattern in clarifying_patterns)
+
+
+def detect_yes_no_confirmation(bot_response: str) -> bool:
+    """
+    Detect if the bot is asking a Yes/No confirmation question.
+    
+    These patterns indicate the bot expects "Yes" or "No" response,
+    NOT another menu option click.
+    
+    Args:
+        bot_response: The bot's response text
+        
+    Returns:
+        True if bot is asking a Yes/No confirmation question
+    """
+    if not bot_response:
+        return False
+    
+    response_lower = bot_response.lower()
+    
+    # Patterns that specifically indicate Yes/No confirmation expected
+    confirmation_patterns = [
+        ", right?",
+        "is that for",
+        "is this for",
+        "is that correct",
+        "is this correct",
+        "correct?",
+        "want to make sure",
+        "just to confirm",
+        "would you like to continue",
+        "do you want to proceed",
+        "shall i continue",
+        "is this the one",
+        "are you sure",
+    ]
+    
+    return any(pattern in response_lower for pattern in confirmation_patterns)
 
 
 def send_message_and_get_response(page: Page, message: str) -> str:
@@ -1954,52 +2857,70 @@ def send_message_and_get_response(page: Page, message: str) -> str:
             page.keyboard.press("Enter")
             print("Sent message via Enter key")
         
-        # Wait for response - give more time
-        page.wait_for_timeout(3000)
+        # Wait for response - give more time for bot to fully respond with menus
+        page.wait_for_timeout(5000)  # Increased from 3000 to allow bot to render menu options
         
-        # Capture response with better selectors
-        response_selectors = [
-            "[class*='message-content']",
-            "[class*='chat-message']",
-            "[class*='bot-message']",
-            "[class*='assistant-message']",
-            "[class*='bubble']",
-            "[class*='response']",
-            "[class*='msg-text']",
-        ]
-        
+        # ENHANCED: Try to capture clean narrative response first
         bot_response = ""
-        for attempt in range(15):  # Try for ~7.5 seconds
-            # Try to get messages
-            try:
-                all_messages = page.query_selector_all("[class*='message']")
-                if all_messages and len(all_messages) > 0:
-                    for msg in reversed(all_messages):
-                        text = (msg.text_content() or "").strip()
-                        if text and text != message and len(text) > 5:
-                            bot_response = text
-                            break
-            except Exception:
-                pass
+        
+        # FIRST: Try extract_bot_narrative_text for clean response
+        try:
+            narrative = extract_bot_narrative_text(page)
+            if narrative and len(narrative) > 15 and narrative.lower() != message.lower():
+                if not is_invalid_response(narrative):
+                    bot_response = narrative
+                    print(f"[SendMessage] Got narrative response: {bot_response[:60]}...")
+        except Exception as e:
+            print(f"[SendMessage] Narrative extraction failed: {e}")
+        
+        # FALLBACK: Use selector-based approach with button filtering
+        if not bot_response:
+            response_selectors = [
+                "[class*='message-content']",
+                "[class*='chat-message']",
+                "[class*='bot-message']",
+                "[class*='assistant-message']",
+                "[class*='bubble']",
+                "[class*='response']",
+                "[class*='msg-text']",
+            ]
             
-            if bot_response:
-                break
-            
-            for selector in response_selectors:
+            for attempt in range(15):  # Try for ~7.5 seconds
+                # Try to get messages
                 try:
-                    elements = page.query_selector_all(selector)
-                    if elements:
-                        latest = elements[-1]
-                        text = (latest.text_content() or "").strip()
-                        if text and text != message and len(text) > 5:
-                            bot_response = text
-                            break
+                    all_messages = page.query_selector_all("[class*='message']")
+                    if all_messages and len(all_messages) > 0:
+                        for msg in reversed(all_messages):
+                            raw_text = (msg.text_content() or "").strip()
+                            if raw_text and raw_text.lower() != message.lower() and len(raw_text) > 10:
+                                # Filter out button text
+                                filtered = filter_button_text_from_response(raw_text)
+                                if filtered and len(filtered) > 10 and not is_invalid_response(filtered):
+                                    bot_response = filtered
+                                    break
                 except Exception:
-                    continue
-            
-            if bot_response:
-                break
-            page.wait_for_timeout(500)
+                    pass
+                
+                if bot_response:
+                    break
+                
+                for selector in response_selectors:
+                    try:
+                        elements = page.query_selector_all(selector)
+                        if elements:
+                            latest = elements[-1]
+                            raw_text = (latest.text_content() or "").strip()
+                            if raw_text and raw_text.lower() != message.lower() and len(raw_text) > 10:
+                                filtered = filter_button_text_from_response(raw_text)
+                                if filtered and len(filtered) > 10 and not is_invalid_response(filtered):
+                                    bot_response = filtered
+                                    break
+                    except Exception:
+                        continue
+                
+                if bot_response:
+                    break
+                page.wait_for_timeout(500)
         
         print(f"Bot response: {bot_response[:50]}..." if bot_response else "No response captured")
         return bot_response
@@ -2018,6 +2939,12 @@ def run_adaptive_test(
 ) -> dict:
     """
     Run adaptive test for a single utterance with LLM-driven flow.
+    
+    Enhanced features:
+    - Dynamic turn limits based on progress
+    - Partial success tracking
+    - Context-aware follow-up prompts
+    - Better timeout handling
     
     Args:
         page: Playwright page object
@@ -2039,30 +2966,150 @@ def run_adaptive_test(
     menu_clicks = []
     turn = 0
     final_decision = None
+    progress_made = False  # Track if we're making progress
+    best_response = ""  # Track best response for partial success
+    best_score = 0.0
+    last_menu_choice = ""  # Track last choice for loop detection
+    consecutive_same_choice = 0  # Count consecutive same selections
+    
+    # Get category for context-aware handling
+    category = get_category_for_utterance(utterance)
     
     for turn in range(max_turns):
         print(f"\n[Turn {turn + 1}] Sending: {current_message[:40]}...")
         
-        # Send message and get response
+        # Send message and get response with stabilization
         bot_response = send_message_and_get_response(page, current_message)
-        print(f"[Turn {turn + 1}] Bot: {bot_response[:100]}...")
         
-        # Extract menu options
-        menu_options = extract_menu_options(page)
+        # If no response, try wait_for_stable_response as fallback with longer timeout
+        if not bot_response or is_invalid_response(bot_response):
+            print(f"[Turn {turn + 1}] Waiting for stable response...")
+            bot_response = wait_for_stable_response(page, timeout_ms=10000)  # Increased from 8000
+        
+        # 📸 CAPTURE SCREENSHOT AT EACH TURN for debugging
+        screenshot_path = ""
+        try:
+            screenshot_suffix = f"turn{turn+1}"
+            screenshot_path = capture_screenshot(page, test_run_id, utterance, "debug", screenshot_suffix)
+        except Exception as e:
+            print(f"[Turn {turn + 1}] Screenshot capture failed: {e}")
+        
+        # 🔍 VISION ANALYSIS: Use Gemini Vision to analyze what the bot is showing
+        vision_analysis = None
+        vision_menu_options = []
+        if screenshot_path and os.path.exists(screenshot_path):
+            try:
+                vision_analysis = analyze_screenshot_with_vision(screenshot_path, utterance)
+                if vision_analysis:
+                    # Use vision-extracted bot message if DOM parsing missed it
+                    if vision_analysis.bot_message and (not bot_response or len(vision_analysis.bot_message) > len(bot_response)):
+                        print(f"[Turn {turn + 1}] 👁️ Vision found better bot message: {vision_analysis.bot_message[:60]}...")
+                        bot_response = vision_analysis.bot_message
+                    
+                    # Capture vision-detected menu options
+                    if vision_analysis.menu_options:
+                        vision_menu_options = vision_analysis.menu_options
+                        print(f"[Turn {turn + 1}] 👁️ Vision detected menu options: {vision_menu_options}")
+            except Exception as e:
+                print(f"[Turn {turn + 1}] Vision analysis failed: {e}")
+        
+        print(f"[Turn {turn + 1}] Bot: {bot_response[:100]}..." if bot_response else f"[Turn {turn + 1}] No response")
+        
+        # Track best response for partial success
+        if bot_response:
+            # Calculate local score for this response
+            local_score = get_response_quality_score(bot_response, category)
+            if local_score > best_score:
+                best_score = local_score
+                best_response = bot_response
+                progress_made = True
+        
+        # ENHANCED: Detect if bot is asking a clarifying question
+        # If so, we need to wait longer for menu options to appear
+        is_clarifying = detect_clarifying_question(bot_response)
+        if is_clarifying:
+            print(f"[Turn {turn + 1}] Detected clarifying question - waiting for menu options...")
+            # Wait longer for menu options when we know bot is asking for selection
+            menu_options = wait_for_menu_options(page, timeout_ms=6000)
+        else:
+            # Standard menu extraction with wait
+            menu_options = extract_menu_options(page, wait_for_options=True)
+        
+        # 👁️ MERGE VISION-DETECTED OPTIONS: Vision analysis often finds options DOM parsing misses
+        if vision_menu_options:
+            # Combine unique options, prioritizing vision-detected ones
+            existing_lower = {opt.lower() for opt in menu_options}
+            for vision_opt in vision_menu_options:
+                if vision_opt.lower() not in existing_lower:
+                    menu_options.append(vision_opt)
+                    print(f"[Turn {turn + 1}] 👁️ Added vision-detected option: {vision_opt}")
+        
         if menu_options:
-            print(f"[Turn {turn + 1}] Menu options: {menu_options}")
+            print(f"[Turn {turn + 1}] Menu options ({len(menu_options)}): {menu_options[:5]}")
+            progress_made = True  # Having menu options means bot is responding
         
-        # Ask LLM for decision
-        decision = analyze_and_decide(current_message, bot_response, menu_options)
+        # LOOP DETECTION: Check if we're about to repeat the same action
+        is_yes_no_confirmation = detect_yes_no_confirmation(bot_response)
+        if is_yes_no_confirmation:
+            print(f"[Turn {turn + 1}] Detected Yes/No confirmation question")
+        
+        # Ask LLM for decision - pass action history for context
+        decision = analyze_and_decide(
+            current_message, 
+            bot_response, 
+            menu_options,
+            action_history=action_history  # Pass history for loop detection
+        )
         print(f"[Turn {turn + 1}] LLM Decision: {decision.action} - {decision.reason}")
         
-        # Record action
+        # LOOP DETECTION: If LLM wants to click the same option as last time,
+        # and this is a confirmation question, switch to clicking "Yes" instead
+        if decision.action == "CLICK_MENU" and decision.menu_choice:
+            if decision.menu_choice.lower() == last_menu_choice.lower():
+                consecutive_same_choice += 1
+                print(f"[Turn {turn + 1}] ⚠️ LOOP DETECTED: Would click same option ({consecutive_same_choice} times)")
+                
+                if consecutive_same_choice >= 1 and is_yes_no_confirmation:
+                    # Look for "Yes" in menu options and switch to it
+                    yes_option = next((opt for opt in menu_options if opt.lower() in ['yes', 'yes, continue', 'confirm']), None)
+                    if yes_option:
+                        print(f"[Turn {turn + 1}] 🔄 Auto-switching to confirmation: '{yes_option}'")
+                        decision = AdaptiveDecision(
+                            action="CLICK_MENU",
+                            menu_choice=yes_option,
+                            reason="Auto-confirmed to break loop (detected repeated selection)",
+                            score=decision.score,
+                            intent_identified=True,
+                            flow_completed=False
+                        )
+                    else:
+                        # No explicit Yes button found - try clicking "Yes" directly
+                        print(f"[Turn {turn + 1}] 🔄 Trying direct 'Yes' click")
+                        decision = AdaptiveDecision(
+                            action="CLICK_MENU",
+                            menu_choice="Yes",
+                            reason="Auto-confirmed with 'Yes' to break loop",
+                            score=decision.score,
+                            intent_identified=True,
+                            flow_completed=False
+                        )
+            else:
+                # Different option, reset counter
+                consecutive_same_choice = 0
+        
+        # Update last menu choice for next iteration
+        if decision.action == "CLICK_MENU" and decision.menu_choice:
+            last_menu_choice = decision.menu_choice
+        
+        # Record action with menu_choice for history tracking
         action_history.append({
             "turn": turn + 1,
             "message": current_message,
-            "response": bot_response[:200],
+            "response": bot_response[:200] if bot_response else "",
             "action": decision.action,
-            "reason": decision.reason
+            "menu_choice": decision.menu_choice if decision.action == "CLICK_MENU" else "",
+            "reason": decision.reason,
+            "progress": progress_made
         })
         
         # Execute decision
@@ -2081,17 +3128,24 @@ def run_adaptive_test(
                 menu_clicks.append(decision.menu_choice)
                 clicked = click_menu_option(page, decision.menu_choice)
                 if clicked:
-                    page.wait_for_timeout(2000)
+                    # Wait longer after menu click for bot to fully respond with new options
+                    # The bot may show "My credit card" / "My banking account" options after this
+                    page.wait_for_timeout(5000)  # Increased from 3000
                     # Continue loop to check response after click
                     current_message = ""  # Will be set by next bot response
                 else:
                     print(f"[Turn {turn + 1}] Could not click menu option")
-                    final_decision = AdaptiveDecision(
-                        action="FAIL",
-                        reason="Could not click menu option",
-                        score=decision.score
-                    )
-                    break
+                    # Don't fail immediately - try alternative approach
+                    if turn < max_turns - 1:
+                        current_message = f"I want to check my {category.replace('_', ' ')}"
+                        print(f"[Turn {turn + 1}] Trying alternative: {current_message}")
+                    else:
+                        final_decision = AdaptiveDecision(
+                            action="FAIL",
+                            reason="Could not click menu option",
+                            score=decision.score
+                        )
+                        break
             else:
                 # No menu choice provided, treat as FAIL
                 final_decision = decision
@@ -2101,13 +3155,15 @@ def run_adaptive_test(
             if decision.follow_up:
                 current_message = decision.follow_up
             else:
-                # No follow-up provided, mark as FAIL
-                final_decision = AdaptiveDecision(
-                    action="FAIL",
-                    reason="No follow-up provided",
-                    score=decision.score
-                )
-                break
+                # No follow-up provided - generate context-aware follow-up
+                context_follow_ups = {
+                    "account_balance": "my credit card balance",
+                    "transactions": "my recent transactions",
+                    "payments": "make a payment",
+                    "card_issues": "report a problem with my card",
+                }
+                current_message = context_follow_ups.get(category, "help me with my account")
+                print(f"[Turn {turn + 1}] Using context-aware follow-up: {current_message}")
         else:
             # Unknown action
             final_decision = AdaptiveDecision(
@@ -2121,26 +3177,42 @@ def run_adaptive_test(
     end_time = time.time()
     latency_ms = int((end_time - start_time) * 1000)
     
+    # Handle max turns with partial success tracking
     if final_decision is None:
-        final_decision = AdaptiveDecision(
-            action="FAIL",
-            reason="Max turns reached without resolution",
-            score=3.0
-        )
+        if progress_made and best_score >= 5.0:
+            # Partial success - we made progress but didn't complete
+            final_decision = AdaptiveDecision(
+                action="PARTIAL",
+                reason=f"Max turns reached but progress made (best score: {best_score})",
+                score=best_score,
+                intent_identified=True,
+                flow_completed=False
+            )
+            status = "partial"
+        else:
+            final_decision = AdaptiveDecision(
+                action="FAIL",
+                reason="Max turns reached without resolution",
+                score=max(3.0, best_score)
+            )
+            status = "fail"
+    else:
+        status = "pass" if final_decision.action == "PASS" else "fail"
     
-    # Determine status
-    status = "pass" if final_decision.action == "PASS" else "fail"
+    # Use best response if no valid response in final decision
+    final_response = action_history[-1]["response"] if action_history else ""
+    if not final_response or is_invalid_response(final_response):
+        final_response = best_response
     
     # Save to database
-    category = get_category_for_utterance(utterance)
     log = ConversationLog(
         test_run_id=test_run_id,
         utterance=utterance,
-        bot_response=action_history[-1]["response"] if action_history else "",
+        bot_response=final_response,
         latency_ms=latency_ms,
         status=status,
         category=category,
-        timestamp=datetime.utcnow(),
+        timestamp=get_local_now(),
         overall_score=final_decision.score,
         llm_feedback=final_decision.reason,
         # Adaptive testing fields
@@ -2161,6 +3233,7 @@ def run_adaptive_test(
         "score": final_decision.score,
         "latency_ms": latency_ms,
         "intent_identified": final_decision.intent_identified,
-        "flow_completed": final_decision.flow_completed
+        "flow_completed": final_decision.flow_completed,
+        "progress_made": progress_made
     }
 
