@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bottestautomation"
+version = "0.1.0"
+description = "Autonomous QA and security testing platform for AI chatbots"
+requires-python = ">=3.11"
+dependencies = []   # pin via requirements.txt; keep pyproject minimal
+
+[project.scripts]
+bottest = "run:main_sync"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]
+
+[tool.setuptools]
+py-modules = ["run"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true

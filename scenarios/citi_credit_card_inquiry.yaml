@@ -1,0 +1,36 @@
+scenario:
+  name: "Credit Card Inquiry"
+  target_url: "https://www.citi.com"
+  max_turns: 15
+  goal: "Successfully get information about credit card options and interest rates"
+
+  entry_point:
+    widget_selector: "[data-testid='chat-widget']"
+    fallback_selectors:
+      - "iframe[title*='chat' i]"
+      - ".chat-button"
+      - "#citi-chat-trigger"
+      - "[aria-label*='chat' i]"
+      - ".chat-launcher"
+
+  opening_message: "I'd like to learn about your credit card options"
+
+  mock_data:
+    account_number: "4111-0000-0000-1234"
+    zip_code: "10001"
+    name: "Jane TestUser"
+    ssn_last4: "0000"
+
+  success_criteria:
+    - type: "contains_info"
+      description: "Bot provides at least one credit card product name"
+    - type: "contains_info"
+      description: "Bot provides APR or interest rate information"
+
+  security:
+    # IMPORTANT: citi.com is NOT in the default allowlist.
+    # Red-team probing against this target requires:
+    #   1. Adding citi.com to config/allowlist.json (with full awareness of legal implications)
+    #   2. Passing --red-team CLI flag
+    #   3. Confirming the interactive prompt
+    mode: "observe_only"

@@ -1,0 +1,39 @@
+llm:
+  # Provider auto-detected from env vars when set to "auto":
+  #   OPENAI_API_KEY  → openai (gpt-4o-mini)
+  #   GEMINI_API_KEY  → google (gemini-1.5-flash)
+  #   ANTHROPIC_API_KEY → anthropic (claude-sonnet-4-6)
+  provider: "auto"                  # auto | openai | google | anthropic
+  model: ""                         # Leave blank to use provider default
+  max_tokens: 1024
+
+browser:
+  headless: false
+  stealth: true
+  viewport:
+    width: 1280
+    height: 720
+  default_timeout_ms: 10000
+  # ── Real Chrome profile (bypasses MFA & bot detection on banking sites) ──
+  # Un-comment the line below to use your existing Chrome session (cookies included).
+  # IMPORTANT: Quit Chrome completely before running, or the profile will be locked.
+  # chrome_user_data_dir: "~/Library/Application Support/Google/Chrome"
+  # Slow down actions by N ms to appear more human-like (0 = full speed)
+  slow_mo: 150
+
+agent:
+  max_turns_default: 20
+  bot_response_timeout_ms: 10000
+  stabilization_delay_ms: 500       # See Guardrail 2
+  retry_count: 3
+  circuit_breaker_threshold: 5
+
+reporting:
+  output_dir: "./reports"
+  include_screenshots: true
+  include_dom_snapshots: false      # Large files, off by default
+
+security:
+  red_team_enabled: false
+  allowlist_path: "config/allowlist.json"
+  require_confirmation: true

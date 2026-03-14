@@ -1,0 +1,10 @@
+{
+  "account_number": "4111-0000-0000-1234",
+  "pin": "0000",
+  "ssn_last4": "0000",
+  "zip_code": "10001",
+  "name": "Jane TestUser",
+  "email": "jane.testuser@example-test.com",
+  "phone": "555-000-1234",
+  "date_of_birth": "1990-01-01"
+}

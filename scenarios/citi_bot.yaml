@@ -1,0 +1,138 @@
+scenario:
+  name: "CitiBot — Authenticated Chat Session"
+  target_url: "https://www.citi.com"
+  max_turns: 20
+  goal: "Log into Citi.com, pass MFA, open the chatbot, and confirm it responds helpfully to banking questions"
+
+  # ── Pre-steps run BEFORE widget detection ───────────────────────────────────
+  pre_steps:
+
+    # 1. Fill in User ID (from CITI_USER_ID in backend/.env)
+    - label: "Fill User ID"
+      action: fill
+      selector: "#username"
+      value: "${CITI_USER_ID}"
+
+    # 2. Fill in Password (from CITI_PASSWORD in backend/.env)
+    - label: "Fill Password"
+      action: fill
+      selector: "#password"
+      value: "${CITI_PASSWORD}"
+
+    # 3. Click Sign On button
+    - label: "Click Sign On"
+      action: click
+      selector: "#signInBtn"
+
+    # 4. Wait for MFA / OTP manual entry! (You will get a text message)
+    #    The script will wait up to 60 seconds for the login to process.
+    #    If you get an OTP page, enter it manually.
+    - label: "Wait for login to process"
+      action: wait
+      ms: 45000
+
+    # 5. Bypass interstitals: force navigate to the dashboard 
+    - label: "Navigate direct to Dashboard"
+      action: navigate
+      url: "https://online.citi.com/US/ag/dashboard"
+
+    # 6. Wait for the dashboard to settle
+    - label: "Wait for page to settle"
+      action: wait
+      ms: 5000
+
+    # 7. Look for and click the Help / Chat trigger button
+    - label: "Click Help/Chat trigger"
+      action: click
+      selector: "[aria-label*='chat' i], [aria-label*='help' i], [aria-label*='virtual assistant' i], [data-testid*='chat'], button[title*='chat' i], .chat-launcher, .chat-button, #help-button, [class*='chatbutton' i]"
+
+    # 8. Wait for the side panel to open
+    - label: "Wait for help panel"
+      action: wait
+      ms: 2000
+
+    # 9. Click 'Ask Citi Bot' button inside the side panel
+    - label: "Click Ask Citi Bot"
+      action: click
+      selector: ".native-lets-chat-button, span:has-text('Ask Citi'), button:has-text('Ask Citi')"
+
+    # 10. Give the chatbot widget time to open
+    - label: "Wait for chatbot to open"
+      action: wait
+      ms: 4000
+
+    # 11. Click "Get Started" or similar initialization buttons if they appear
+    # This selector looks for common onboarding buttons within the widget frame.
+    # If not found, we assume the bot is stuck. We close it and reopen it.
+    - label: "Click Get Started (with fallback to close/reopen)"
+      action: click
+      selector: "button:has-text('Get Started'), button:has-text('Start Chat'), .start-chat-btn"
+      timeout_ms: 5000
+      fallback_steps:
+        - label: "Close Widget"
+          action: click
+          selector: "button[aria-label*='close' i], .chat-close, .close-button, .chat-minimize, [title*='close' i], .mat-icon:has-text('close')"
+          optional: true
+          timeout_ms: 5000
+        - label: "Wait for close animation"
+          action: wait
+          ms: 2000
+        - label: "Reopen Chat Widget"
+          action: click
+          selector: ".native-lets-chat-button, span:has-text('Ask Citi'), button:has-text('Ask Citi')"
+        - label: "Wait for chatbot to re-open"
+          action: wait
+          ms: 4000
+
+    # 12. Wait for the bot to send its initial welcome message and icons
+    - label: "Wait for bot initialization"
+      action: wait
+      ms: 5000
+
+  # ── Chatbot widget detection ─────────────────────────────────────────────────
+  entry_point:
+    widget_selector: "iframe[title*='chat' i]"
+    fallback_selectors:
+      - "iframe[src*='chat']"
+      - "iframe[src*='liveperson']"
+      - "iframe[src*='lp-chat']"
+      - "#nativeUIChat"
+      - "app-koreai-chat"
+      - "[data-testid='chat-widget']"
+      - "[id*='lp_chat']"
+      - "[id*='lpChat']"
+      - "[class*='chat-widget']"
+      - "[class*='chatWidget']"
+      - "[aria-label*='chat window' i]"
+
+  # ── LLM Agent Configuration ──────────────────────────────────────────────────
+  agent:
+    system_prompt_extension: |
+      The chatbot has just initialized. Please carefully read the initial welcome message, 
+      including any quick action buttons or menus presented by the bot. Let the user know 
+      what "Hi, I need help with my account" by contextually referencing the bot's initial options.
+
+  # ── Opening message ──────────────────────────────────────────────────────────
+  # The opening message is dynamic if we want the LLM to start, but for now we keep the static trigger 
+  # OR we can let the LLM take the first turn if the engine supports dynamic string generation.
+  opening_message: "Hi, I need help with my account"
+
+  # ── Mock / sensitive data the agent may provide if bot asks ─────────────────
+  mock_data:
+    account_number: "4111-0000-0000-1234"
+    zip_code:       "10001"
+    ssn_last4:      "0000"
+    name:           "Jane TestUser"
+
+  # ── Success criteria ──────────────────────────────────────────────────────────
+  success_criteria:
+    - type: "contains_info"
+      description: "Bot greets the user and acknowledges the account help request"
+    - type: "contains_info"
+      description: "Bot offers to help with at least one specific banking service (balance, payment, card, transfer)"
+    - type: "not_escalated"
+      description: "Bot handles the query without immediately routing to a human agent"
+
+  # ── Security ─────────────────────────────────────────────────────────────────
+  security:
+    mode: "observe_only"

@@ -1,136 +1,158 @@
-"""Database models and API schemas."""
+"""SQLModel database schemas for BOTTestAutomation.
+
+Three-table hierarchy: TestRun → ConversationThread → MessageExchange.
+"""
+import uuid
+import logging
 from datetime import datetime
-from typing import Optional, List
-from sqlmodel import SQLModel, Field
-from pydantic import BaseModel
+from typing import Generator, Optional
+
+from sqlmodel import Field, Session, SQLModel, create_engine, select
+
+logger = logging.getLogger(__name__)
+
+_DB_PATH = "sqlite:///./bottest.db"
+_engine = None
 
 
-# ============ Database Models ============
+def get_engine():
+    """Return the singleton SQLite engine, creating it on first call."""
+    global _engine
+    if _engine is None:
+        _engine = create_engine(
+            _DB_PATH,
+            connect_args={"check_same_thread": False},
+            echo=False,
+        )
+    return _engine
+
+
+def create_tables() -> None:
+    """Create all database tables if they do not already exist."""
+    SQLModel.metadata.create_all(get_engine())
+    logger.info("Database tables created/verified at %s", _DB_PATH)
+
+
+def get_session() -> Generator[Session, None, None]:
+    """Yield a database session and close it on exit."""
+    with Session(get_engine()) as session:
+        yield session
+
 
 class TestRun(SQLModel, table=True):
-    """Test run record."""
-    id: Optional[int] = Field(default=None, primary_key=True)
+    """Top-level record for a single scenario test execution."""
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+    )
+    scenario_name: str
     target_url: str
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    status: str  # PASS | FAIL | ERROR | PARTIAL
+    red_team_enabled: bool = False
+    started_at: datetime
     completed_at: Optional[datetime] = None
-    status: str = "running"  # running, completed, failed
-    total_utterances: int = 0
-    avg_latency_ms: Optional[float] = None
-    self_service_rate: Optional[float] = None
-    error_message: Optional[str] = None
-    # NEW: LLM evaluation averages
-    avg_quality_score: Optional[float] = None
-    avg_relevance_score: Optional[float] = None
-    avg_helpfulness_score: Optional[float] = None
+    total_turns: int = 0
+    duration_seconds: Optional[float] = None
+    report_path: str  # Path to reports/[run_id]/ directory
 
 
-class ConversationLog(SQLModel, table=True):
-    """Individual conversation log entry."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="testrun.id")
-    utterance: str
-    bot_response: str = ""
-    latency_ms: int = 0
-    status: str = "pending"  # pass, fail, error
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    category: str = ""  # utterance category
-    
-    # LLM Evaluation fields
-    relevance_score: Optional[float] = None
-    helpfulness_score: Optional[float] = None
-    clarity_score: Optional[float] = None
-    accuracy_score: Optional[float] = None
-    overall_score: Optional[float] = None
-    sentiment: Optional[str] = None
-    llm_feedback: Optional[str] = None
-    
-    # NEW: Adaptive testing fields
-    turns: int = 1                      # Number of conversation turns
-    menu_clicks: str = ""               # JSON list of clicked menu options
-    intent_identified: bool = False     # Did bot identify correct intent?
-    flow_completed: bool = False        # Did bot complete the flow?
-    action_history: str = ""            # JSON: [{"action":"CLICK_MENU","target":"Balance"}]
+class ConversationThread(SQLModel, table=True):
+    """One conversation thread within a TestRun."""
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+    )
+    test_run_id: str = Field(foreign_key="testrun.id")
+    thread_index: int = 0  # For multi-thread scenarios
+    status: str = "active"
 
 
-# ============ API Request/Response Schemas ============
+class MessageExchange(SQLModel, table=True):
+    """A single turn within a ConversationThread."""
 
-class LoginSelectors(BaseModel):
-    """CSS selectors for login form."""
-    username: str = "#username"
-    password: str = "#password"
-    submit: str = "#signInBtn"
-
-
-class ChatbotConfig(BaseModel):
-    """CSS selectors for chatbot widget."""
-    widget_selector: str = "[data-testid='chat-widget']"
-    input_selector: str = "input[placeholder*='message'], textarea[placeholder*='message']"
-    send_selector: str = "button[type='submit'], [data-testid='send-button']"
-    response_selector: str = "[class*='bot-message'], [class*='assistant']"
-    login_selectors: Optional[LoginSelectors] = None
-
-
-class Credentials(BaseModel):
-    """Login credentials."""
-    username: str = ""
-    password: str = ""
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+    )
+    thread_id: str = Field(foreign_key="conversationthread.id")
+    turn_number: int
+    sender: str  # "user" | "bot" | "system"
+    content: str
+    timestamp: datetime
+    bot_response_ms: Optional[int] = None
+    sentiment_score: Optional[float] = None  # -1.0 to 1.0
+    security_flag: Optional[str] = None  # prompt_leak | injection_success | deflected
+    agent_reasoning: Optional[str] = None  # REASON step summary
 
 
-class StartTestRequest(BaseModel):
-    """Request body for starting a test."""
-    target_url: str = "https://www.citi.com"
-    credentials: Optional[Credentials] = None
-    utterances: List[str] = []
-    utterance_categories: List[str] = []  # NEW: Categories to test
-    chatbot_config: Optional[ChatbotConfig] = None
-    use_library: bool = False  # NEW: Use built-in utterance library
+def persist_session_to_db(
+    session,  # SessionState — avoid circular import
+    run_id: str,
+    started_at: datetime,
+    completed_at: datetime,
+    report_path: str,
+    sentiment_by_turn: Optional[dict] = None,
+) -> None:
+    """Persist a completed SessionState to the SQLite database.
 
+    Creates one TestRun, one ConversationThread, and one MessageExchange per
+    history entry.  Idempotent on duplicate run_id (silently skips on error).
 
-class StartTestResponse(BaseModel):
-    """Response after starting a test."""
-    test_run_id: int
-    status: str
+    Args:
+        session: Completed SessionState from engine.py.
+        run_id: Unique run identifier (used as TestRun primary key).
+        started_at: Run start timestamp.
+        completed_at: Run end timestamp.
+        report_path: Absolute path to the reports/[run_id]/ directory.
+        sentiment_by_turn: Optional mapping of turn_number → sentiment score.
+    """
+    if sentiment_by_turn is None:
+        sentiment_by_turn = {}
+    try:
+        engine = get_engine()
+        with Session(engine) as db:
+            test_run = TestRun(
+                id=run_id,
+                scenario_name=session.scenario.get("name", "Unknown"),
+                target_url=session.scenario.get("target_url", ""),
+                status=session.final_status,
+                red_team_enabled=bool(getattr(session, "red_team_active", False)),
+                started_at=started_at,
+                completed_at=completed_at,
+                total_turns=session.turn,
+                duration_seconds=round((completed_at - started_at).total_seconds(), 2),
+                report_path=report_path,
+            )
+            db.add(test_run)
+            db.flush()
 
+            thread = ConversationThread(
+                test_run_id=run_id,
+                thread_index=0,
+                status=session.final_status,
+            )
+            db.add(thread)
+            db.flush()
 
-class Metrics(BaseModel):
-    """Calculated test metrics."""
-    avg_latency_ms: float = 0
-    self_service_rate: float = 0
-    total_tests: int = 0
-    passed: int = 0
-    failed: int = 0  # NEW: Changed from escalated
-    # LLM metrics
-    avg_quality_score: float = 0
-    avg_relevance_score: float = 0
-    avg_helpfulness_score: float = 0
-    # NEW: Adaptive testing metrics
-    intent_accuracy: float = 0       # % of correct intent identification
-    flow_completion_rate: float = 0  # % of completed flows
-    avg_turns: float = 0             # Average conversation turns
+            for entry in session.history:
+                msg = MessageExchange(
+                    thread_id=thread.id,
+                    turn_number=entry.turn,
+                    sender=entry.sender,
+                    content=entry.content,
+                    timestamp=entry.timestamp,
+                    bot_response_ms=entry.bot_response_ms,
+                    agent_reasoning=entry.agent_reasoning,
+                    sentiment_score=sentiment_by_turn.get(entry.turn) if entry.sender == "bot" else None,
+                )
+                db.add(msg)
 
-
-class TestResultsResponse(BaseModel):
-    """Response containing test results."""
-    test_run: Optional[TestRun] = None
-    conversations: List[ConversationLog] = []
-    metrics: Metrics = Metrics()
-
-
-class HealthResponse(BaseModel):
-    """Health check response."""
-    status: str
-    timestamp: str
-    llm_available: bool = False  # NEW: Is LLM configured?
-
-
-class UtteranceCategory(BaseModel):
-    """Utterance category info."""
-    name: str
-    count: int
-    description: str
-
-
-class UtteranceLibraryResponse(BaseModel):
-    """Response with utterance library info."""
-    categories: List[UtteranceCategory]
-    total_utterances: int
+            db.commit()
+            logger.info(
+                "DB persisted: run_id=%s  turns=%d  messages=%d",
+                run_id, session.turn, len(session.history),
+            )
+    except Exception as exc:
+        logger.error("DB persistence failed (non-fatal): %s", exc)

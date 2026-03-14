@@ -1,0 +1,16 @@
+{
+  "approved_targets": [
+    {
+      "url_pattern": "https://localhost:*/**",
+      "notes": "Local development chatbots"
+    },
+    {
+      "url_pattern": "http://localhost:*/**",
+      "notes": "Local development chatbots (HTTP)"
+    },
+    {
+      "url_pattern": "https://staging.yourcompany.com/**",
+      "notes": "Internal staging environment — replace with your own domain"
+    }
+  ]
+}

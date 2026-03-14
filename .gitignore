@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Environment files — NEVER commit secrets
+.env
+*.env
+!.env.example
+
+# Database files
+*.db
+*.sqlite3
+
+# Reports (generated at runtime)
+reports/*/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Playwright
+playwright-report/
+test-results/
+
+# Coverage
+.coverage
+htmlcov/
+.pytest_cache/

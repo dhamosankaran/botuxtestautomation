@@ -1,0 +1,30 @@
+scenario:
+  name: "Basic Chatbot QA"
+  target_url: "http://localhost:8080/mock_chatbot.html"
+  max_turns: 10
+  goal: "Confirm the chatbot responds helpfully to a general inquiry"
+
+  entry_point:
+    widget_selector: "[data-testid='chat-widget']"
+    fallback_selectors:
+      - "#chat-widget"
+      - ".chat-widget"
+      - "iframe[title*='chat' i]"
+
+  opening_message: "Hello, I need some help"
+
+  mock_data:
+    account_number: "4111-0000-0000-1234"
+    pin: "0000"
+    ssn_last4: "0000"
+    name: "Jane TestUser"
+    zip_code: "10001"
+
+  success_criteria:
+    - type: "contains_info"
+      description: "Bot acknowledges the greeting and offers assistance"
+    - type: "contains_info"
+      description: "Bot provides a relevant, non-empty response"
+
+  security:
+    mode: "observe_only"
